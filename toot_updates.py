@@ -3,30 +3,30 @@ from __future__ import division, absolute_import, print_function, unicode_litera
 from time import sleep
 from datetime import datetime, timedelta
 from requests.exceptions import ConnectionError
-import ConfigParser
-import tempfile
-import logging
-import pickle
-import tweepy
+from configparser import ConfigParser
 from geonames import GeoNamesGeocoder
 from epic import EPIC
 from processing import process_image
+from mastodon import Mastodon
+
+import tempfile
+import logging
+import pickle
 
 
 def suffix(d):
     return 'th' if 11 <= d <= 13 else {1: 'st', 2: 'nd', 3: 'rd'}.get(d % 10, 'th')
 
 
-class TweetEPIC(object):
+class TootEPIC(object):
     def __init__(self):
         self.log = logging.getLogger(__name__)
-        self.config = ConfigParser.ConfigParser()
-        self.config.read('epictweet.conf')
-        auth = tweepy.OAuthHandler(self.config.get('twitter', 'api_key'),
-                                   self.config.get('twitter', 'api_secret'))
-        auth.set_access_token(self.config.get('twitter', 'access_key'),
-                              self.config.get('twitter', 'access_secret'))
-        self.twitter = tweepy.API(auth)
+        self.config = ConfigParser()
+
+        self.mastodon = Mastodon(
+            client_id='toot_cred.txt',
+            access_token='dscovr_cred.txt',
+            api_base_url='https://social.jdiez.me')
         self.epic = EPIC()
         self.geocoder = GeoNamesGeocoder()
         self.state = {'image_queue': {},
@@ -69,26 +69,26 @@ class TweetEPIC(object):
         if self.state['last_post_time'] < (datetime.now() - interval) \
            and len(self.state['image_queue']) > 0:
             try:
-                self.do_tweet()
+                self.do_toot()
             except ConnectionError:
                 self.log.exception("Unable to fetch image file")
             self.save_state()
 
-    def do_tweet(self):
+    def do_toot(self):
         image_date = sorted(self.state['image_queue'].keys())[0]
         image = self.state['image_queue'][image_date]
         self.log.info("Tweeting an image")
 
         with tempfile.NamedTemporaryFile(suffix='.png') as imagefile:
             self.fetch_image(image, imagefile)
-            self.post_tweet(image, imagefile)
+            self.post_toot(image, imagefile)
 
         del self.state['image_queue'][image_date]
         self.state['last_posted_image'] = image_date
         self.state['last_post_time'] = datetime.now()
-        self.log.info("One image tweeted, %s left in queue", len(self.state['image_queue']))
+        self.log.info("One image tooted, %s left in queue", len(self.state['image_queue']))
 
-    def post_tweet(self, image, imagefile):
+    def post_toot(self, image, imagefile):
         lat = image['centroid_coordinates']['lat']
         lon = image['centroid_coordinates']['lon']
         self.log.info("Geocoding %s, %s", lat, lon)
@@ -104,8 +104,9 @@ class TweetEPIC(object):
             text = "%s, %s" % (datestring, place)
         else:
             text = datestring
-        self.twitter.update_with_media(imagefile.name, file=imagefile, status=text,
-                                       lat=lat, long=lon)
+
+        media = self.mastodon.media_post(imagefile.name)
+        self.mastodon.status_post(text, media_ids=[media['id']])
 
     def fetch_image(self, image, destfile):
         with tempfile.NamedTemporaryFile(suffix='.png') as downloadfile:
@@ -116,7 +117,7 @@ class TweetEPIC(object):
         logging.basicConfig(level=logging.INFO)
 
         try:
-            with open("./state.pickle", "r") as f:
+            with open("./state.pickle", "rb") as f:
                 self.state = pickle.load(f)
         except IOError:
             self.log.exception("Failure loading state file, resetting")
@@ -132,7 +133,7 @@ class TweetEPIC(object):
 
     def save_state(self):
         self.log.info("Saving state...")
-        with open("./state.pickle", "w") as f:
+        with open("./state.pickle", "wb") as f:
             pickle.dump(self.state, f, pickle.HIGHEST_PROTOCOL)
 
-TweetEPIC().run()
+TootEPIC().run()
